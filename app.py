@@ -8,6 +8,8 @@ import streamlit.components.v1 as components
 
 from storage import (
     BASE_DIR,
+    STATIC_DIR,
+    STATIC_UPLOAD_DIR,
     UPLOAD_DIR,
     add_clip,
     delete_clip,
@@ -21,9 +23,10 @@ from storage import (
 from utils import (
     SUPPORTED_VIDEO_TYPES,
     convert_to_browser_mp4,
+    copy_to_static_upload,
     format_time,
     save_uploaded_file,
-    video_to_data_uri,
+    static_file_url,
 )
 
 
@@ -133,12 +136,19 @@ def init_state() -> None:
         st.session_state.status_message = None
     if "study_mode" not in st.session_state:
         st.session_state.study_mode = "📺 完整视频模式"
+    if "pending_study_mode" not in st.session_state:
+        st.session_state.pending_study_mode = None
     if "last_upload_signature" not in st.session_state:
         st.session_state.last_upload_signature = None
 
 
 def set_status(kind: str, text: str) -> None:
     st.session_state.status_message = {"kind": kind, "text": text}
+
+
+def set_study_mode(mode: str) -> None:
+    st.session_state.study_mode = mode
+    st.session_state.pending_study_mode = mode
 
 
 def show_status() -> None:
@@ -164,15 +174,12 @@ def current_video_path(project: dict[str, Any]) -> Path | None:
     return None
 
 
-@st.cache_data(show_spinner=False)
-def cached_video_data_uri(path_text: str, modified_ns: int, size: int) -> str:
-    _ = (modified_ns, size)
-    return video_to_data_uri(Path(path_text))
-
-
 def build_video_source(path: Path) -> str:
-    stat = path.stat()
-    return cached_video_data_uri(str(path), stat.st_mtime_ns, stat.st_size)
+    try:
+        path.resolve().relative_to(STATIC_DIR.resolve())
+    except ValueError:
+        path = copy_to_static_upload(path, STATIC_UPLOAD_DIR)
+    return static_file_url(path, STATIC_DIR)
 
 
 def handle_upload() -> None:
@@ -191,16 +198,16 @@ def handle_upload() -> None:
     with st.spinner("正在保存视频"):
         saved_path = save_uploaded_file(uploaded_file, UPLOAD_DIR)
         playable_path, warning = convert_to_browser_mp4(saved_path)
-        project = new_project(uploaded_file.name, playable_path, saved_path)
+        static_playable_path = copy_to_static_upload(playable_path, STATIC_UPLOAD_DIR)
+        project = new_project(uploaded_file.name, static_playable_path, saved_path)
         save_project(project)
 
     st.session_state.project = project
     st.session_state.active_clip_id = None
     st.session_state.pending_start = None
     st.session_state.loop_enabled = False
-    st.session_state.study_mode = "📺 完整视频模式"
+    set_study_mode("📺 完整视频模式")
     st.session_state.last_upload_signature = signature
-    cached_video_data_uri.clear()
     if warning:
         set_status("warning", warning)
     else:
@@ -211,7 +218,7 @@ def handle_upload() -> None:
 def select_clip(clip_id: int) -> None:
     st.session_state.active_clip_id = clip_id
     st.session_state.loop_enabled = True
-    st.session_state.study_mode = "✂️ 片段学习模式"
+    set_study_mode("✂️ 片段学习模式")
 
 
 def select_adjacent_clip(direction: int) -> None:
@@ -317,7 +324,7 @@ def handle_player_event(event: Any) -> None:
         st.session_state.active_clip_id = new_clip_id
         st.session_state.loop_enabled = True
         st.session_state.pending_start = None
-        st.session_state.study_mode = "✂️ 片段学习模式"
+        set_study_mode("✂️ 片段学习模式")
         set_status("success", f"Clip {new_clip_id} 已创建。")
         st.rerun()
 
@@ -404,13 +411,24 @@ def render_main_panel() -> None:
     project = st.session_state.project
     video_path = current_video_path(project)
 
+    pending_mode = st.session_state.pending_study_mode
+    if pending_mode:
+        st.session_state.study_mode = pending_mode
+        st.session_state.study_mode_widget = pending_mode
+        st.session_state.pending_study_mode = None
+    elif "study_mode_widget" not in st.session_state:
+        st.session_state.study_mode_widget = st.session_state.study_mode
+    else:
+        st.session_state.study_mode = st.session_state.study_mode_widget
+
     mode = st.radio(
         "学习模式",
         ["📺 完整视频模式", "✂️ 片段学习模式"],
         horizontal=True,
         label_visibility="collapsed",
-        key="study_mode",
+        key="study_mode_widget",
     )
+    st.session_state.study_mode = mode
     clip_mode = mode.startswith("✂️")
 
     show_status()
@@ -423,8 +441,7 @@ def render_main_panel() -> None:
         st.error("project.json 中的视频文件不存在，请重新上传。")
         return
 
-    with st.spinner("正在加载视频"):
-        video_source = build_video_source(video_path)
+    video_source = build_video_source(video_path)
 
     render_player(video_source, mode)
 
