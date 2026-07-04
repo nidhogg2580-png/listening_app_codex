@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Repeated Listening Video Player</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --text: #111827;
+      --muted: #64748b;
+      --line: #e5e7eb;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --blue: #2563eb;
+      --green: #059669;
+      --red: #dc2626;
+      --shadow: 0 16px 34px rgba(15, 23, 42, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background: transparent;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    .shell {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .video-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #0f172a;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      cursor: pointer;
+      background: #0f172a;
+    }
+
+    .badge {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      display: none;
+      align-items: center;
+      gap: 0.35rem;
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 999px;
+      padding: 0.25rem 0.6rem;
+      color: #ffffff;
+      background: rgba(17, 24, 39, 0.62);
+      backdrop-filter: blur(8px);
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    .badge.visible {
+      display: inline-flex;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(118px, auto) minmax(118px, auto) 1fr;
+      gap: 0.65rem;
+      align-items: center;
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-soft);
+    }
+
+    button {
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      background: #ffffff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--blue);
+      color: var(--blue);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    .mark-start {
+      border-color: rgba(37, 99, 235, 0.28);
+    }
+
+    .mark-end {
+      border-color: rgba(5, 150, 105, 0.28);
+    }
+
+    .timebox {
+      min-width: 0;
+      justify-self: end;
+      color: var(--muted);
+      font-size: 0.86rem;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .timebox strong {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .subtitles {
+      display: none;
+      grid-template-columns: 1fr;
+      gap: 0.35rem;
+      padding: 0.85rem 1rem 1rem;
+      background: #ffffff;
+    }
+
+    .subtitles.visible {
+      display: grid;
+    }
+
+    .subtitle-line {
+      margin: 0;
+      color: var(--text);
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+
+    .subtitle-cn {
+      color: #334155;
+    }
+
+    @media (max-width: 640px) {
+      .toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .timebox {
+        grid-column: 1 / -1;
+        justify-self: stretch;
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="video-wrap">
+      <video id="player" controls playsinline preload="metadata" onclick="togglePlay()"></video>
+      <div id="loopBadge" class="badge">循环播放</div>
+    </div>
+    <div class="toolbar">
+      <button id="markStart" class="mark-start" type="button">标记起点</button>
+      <button id="markEnd" class="mark-end" type="button">标记终点</button>
+      <div class="timebox">
+        <strong id="currentTime">00:00.00</strong>
+        <span id="clipRange"></span>
+      </div>
+    </div>
+    <div id="subtitleBox" class="subtitles">
+      <p id="subtitleEn" class="subtitle-line"></p>
+      <p id="subtitleCn" class="subtitle-line subtitle-cn"></p>
+    </div>
+  </div>
+
+  <script>
+    const Streamlit = {
+      RENDER_EVENT: "streamlit:render",
+      setComponentReady: function () {
+        window.parent.postMessage(
+          { isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 },
+          "*"
+        );
+      },
+      setFrameHeight: function (height) {
+        window.parent.postMessage(
+          { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height },
+          "*"
+        );
+      },
+      setComponentValue: function (value) {
+        window.parent.postMessage(
+          { isStreamlitMessage: true, type: "streamlit:setComponentValue", value, dataType: "json" },
+          "*"
+        );
+      },
+    };
+
+    let args = {};
+    let lastSource = "";
+    let lastClipKey = "";
+    const player = document.getElementById("player");
+    const currentTimeLabel = document.getElementById("currentTime");
+    const clipRangeLabel = document.getElementById("clipRange");
+    const loopBadge = document.getElementById("loopBadge");
+    const subtitleBox = document.getElementById("subtitleBox");
+    const subtitleEn = document.getElementById("subtitleEn");
+    const subtitleCn = document.getElementById("subtitleCn");
+
+    function formatTime(seconds) {
+      const safeSeconds = Math.max(Number(seconds) || 0, 0);
+      const minutes = Math.floor(safeSeconds / 60);
+      const wholeSeconds = Math.floor(safeSeconds % 60);
+      const centiseconds = Math.floor((safeSeconds - Math.floor(safeSeconds)) * 100);
+      return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+    }
+
+    function togglePlay() {
+      if (!player.src) return;
+      if (player.paused) {
+        player.play().catch(function () {});
+      } else {
+        player.pause();
+      }
+    }
+
+    window.togglePlay = togglePlay;
+
+    function emitPlayerEvent(eventName) {
+      Streamlit.setComponentValue({
+        event: eventName,
+        current_time: Number(player.currentTime || 0),
+        event_id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      });
+    }
+
+    function activeClip() {
+      return args.activeClip || null;
+    }
+
+    function clipKey(clip, loop) {
+      if (!clip) return `full:${loop}`;
+      return `${clip.id}:${clip.start}:${clip.end}:${loop}`;
+    }
+
+    function seekClipStartAndPlay() {
+      const clip = activeClip();
+      if (!clip || !args.loop) return;
+      const start = Number(clip.start || 0);
+      if (Number.isFinite(start)) {
+        try {
+          player.currentTime = start;
+        } catch (error) {}
+        player.play().catch(function () {});
+      }
+    }
+
+    function renderSubtitles(clip) {
+      const en = clip && clip.subtitle_en ? String(clip.subtitle_en).trim() : "";
+      const cn = clip && clip.subtitle_cn ? String(clip.subtitle_cn).trim() : "";
+      subtitleEn.textContent = en;
+      subtitleCn.textContent = cn;
+      subtitleEn.style.display = en ? "block" : "none";
+      subtitleCn.style.display = cn ? "block" : "none";
+      subtitleBox.classList.toggle("visible", Boolean(en || cn));
+    }
+
+    function renderStatus() {
+      const clip = activeClip();
+      currentTimeLabel.textContent = formatTime(player.currentTime || 0);
+      if (clip) {
+        clipRangeLabel.textContent = ` / Clip ${clip.id}: ${formatTime(clip.start)} → ${formatTime(clip.end)}`;
+      } else if (args.pendingStart !== null && args.pendingStart !== undefined) {
+        clipRangeLabel.textContent = ` / 起点 ${formatTime(args.pendingStart)}`;
+      } else {
+        clipRangeLabel.textContent = "";
+      }
+      loopBadge.classList.toggle("visible", Boolean(args.loop && clip));
+      renderSubtitles(clip);
+    }
+
+    function resizeFrame() {
+      Streamlit.setFrameHeight(document.documentElement.scrollHeight);
+    }
+
+    function onRender(event) {
+      args = event.detail.args || {};
+      const nextSource = args.videoUrl || "";
+      if (nextSource && nextSource !== lastSource) {
+        lastSource = nextSource;
+        player.src = nextSource;
+        player.load();
+      }
+
+      const nextClipKey = clipKey(activeClip(), Boolean(args.loop));
+      if (nextClipKey !== lastClipKey) {
+        lastClipKey = nextClipKey;
+        window.setTimeout(seekClipStartAndPlay, 80);
+      }
+
+      renderStatus();
+      window.setTimeout(resizeFrame, 0);
+    }
+
+    player.addEventListener("loadedmetadata", function () {
+      renderStatus();
+      seekClipStartAndPlay();
+      resizeFrame();
+    });
+
+    player.addEventListener("timeupdate", function () {
+      const clip = activeClip();
+      const current = Number(player.currentTime || 0);
+      currentTimeLabel.textContent = formatTime(current);
+
+      if (args.loop && clip) {
+        const start = Number(clip.start || 0);
+        const end = Number(clip.end || 0);
+        if (Number.isFinite(start) && Number.isFinite(end) && current > end) {
+          player.currentTime = start;
+          player.play().catch(function () {});
+        }
+      }
+    });
+
+    document.getElementById("markStart").addEventListener("click", function () {
+      emitPlayerEvent("mark_start");
+    });
+
+    document.getElementById("markEnd").addEventListener("click", function () {
+      emitPlayerEvent("mark_end");
+    });
+
+    window.addEventListener("message", function (event) {
+      const data = event.data || {};
+      if (data.type === Streamlit.RENDER_EVENT) {
+        window.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, { detail: data }));
+      }
+    });
+
+    window.addEventListener(Streamlit.RENDER_EVENT, onRender);
+    if ("ResizeObserver" in window) {
+      new ResizeObserver(resizeFrame).observe(document.body);
+    }
+    Streamlit.setComponentReady();
+    resizeFrame();
+  </script>
+</body>
+</html>
